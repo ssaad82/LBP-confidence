@@ -152,7 +152,7 @@ def build_daily(df: pd.DataFrame) -> pd.DataFrame:
 def main():
     st.set_page_config(page_title="Lebanese Lira Sentiment", layout="wide")
     st.title("🇱🇧 Daily Lebanese Lira Sentiment (Telegram + Google + Nitter)")
-    st.caption("Tracking from June 13, 2025 (start of the Israel-Iran war) to today.")
+    st.caption("Tracking from February 28, 2026 (start of the conflict in the middle east) to today.")
 
     with st.sidebar:
         st.header("Settings")
