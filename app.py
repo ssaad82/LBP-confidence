@@ -1,5 +1,5 @@
-import random
 import asyncio
+import concurrent.futures
 from datetime import datetime, timezone
 from typing import Dict, List
 
@@ -20,9 +20,6 @@ API_ID = 34069133
 API_HASH = "f8ec2f82d1eb6df4bdfd004fbd7fea48"
 SESSION_NAME = "telegram_session"
 
-MAX_TELEGRAM_POSTS = 20
-MAX_TELEGRAM_COMMENTS = 40
-MAX_NITTER_ITEMS = 10
 MAX_BERT_ITEMS = 120
 
 
@@ -46,7 +43,7 @@ def normalize_label(label: str) -> str:
 
 # ================= GOOGLE =================
 
-def search_google_news(query: str, start_date: datetime, end_date: datetime) -> List[Dict]:
+def search_google_news(query, start_date, end_date):
     try:
         encoded = requests.utils.quote(query)
         url = f"https://news.google.com/rss/search?q={encoded}%20when:30d"
@@ -70,9 +67,9 @@ def search_google_news(query: str, start_date: datetime, end_date: datetime) -> 
         return []
 
 
-# ================= NITTER (SAFE) =================
+# ================= NITTER (SAFE + FAST) =================
 
-def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[Dict]:
+def search_nitter(query, start_date, end_date):
     try:
         encoded = requests.utils.quote(query)
         url = f"https://nitter.net/search/rss?f=tweets&q={encoded}"
@@ -85,7 +82,7 @@ def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[
         feed = feedparser.parse(response.text)
 
         rows = []
-        for entry in feed.entries[:MAX_NITTER_ITEMS]:
+        for entry in feed.entries[:10]:
             if not getattr(entry, "published_parsed", None):
                 continue
 
@@ -105,74 +102,57 @@ def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[
         return []
 
 
-# ================= TELEGRAM (FIXED + FAST) =================
+# ================= TELEGRAM (NON-BLOCKING SAFE) =================
 
-def search_telegram(channel_ids: List[str], start_date: datetime, end_date: datetime) -> List[Dict]:
-    rows = []
+def search_telegram(channel_ids, start_date, end_date):
 
-    async def fetch():
-        async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
-            for channel in channel_ids:
-                try:
-                    entity = await client.get_entity(channel)
+    def run_telegram():
+        rows = []
 
-                    messages = await client.get_messages(entity, limit=MAX_TELEGRAM_POSTS)
+        async def fetch():
+            async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
+                for channel in channel_ids:
+                    try:
+                        entity = await client.get_entity(channel)
+                        messages = await client.get_messages(entity, limit=20)
 
-                    comment_count = 0
+                        for message in messages:
+                            if not message.text or not message.date:
+                                continue
 
-                    for message in messages:
+                            published = message.date.replace(tzinfo=timezone.utc)
 
-                        if not message.date:
-                            continue
+                            if start_date <= published <= end_date:
+                                rows.append({
+                                    "source": "telegram",
+                                    "published_at": published,
+                                    "text": message.text,
+                                    "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
+                                })
 
-                        published = message.date.replace(tzinfo=timezone.utc)
+                    except Exception as e:
+                        print("Telegram error:", e)
 
-                        if start_date <= published <= end_date and message.text:
-                            rows.append({
-                                "source": "telegram_post",
-                                "published_at": published,
-                                "text": message.text,
-                                "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
-                            })
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(fetch())
+        loop.close()
 
-                        # COMMENTS (VERY LIMITED)
-                        if message.replies and message.replies.comments and comment_count < MAX_TELEGRAM_COMMENTS:
-                            try:
-                                replies = await client.get_messages(entity, reply_to=message.id, limit=2)
+        return rows
 
-                                for reply in replies:
-                                    if not reply.text:
-                                        continue
-
-                                    reply_date = reply.date.replace(tzinfo=timezone.utc)
-
-                                    if start_date <= reply_date <= end_date:
-                                        rows.append({
-                                            "source": "telegram_comment",
-                                            "published_at": reply_date,
-                                            "text": reply.text,
-                                            "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
-                                        })
-                                        comment_count += 1
-
-                            except:
-                                pass
-
-                except Exception as e:
-                    print("Telegram error:", e)
-
-    # ✅ FIXED event loop (no freezing)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(fetch())
-    loop.close()
-
-    return rows
+    # 🚨 HARD TIMEOUT (prevents freezing)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(run_telegram)
+        try:
+            return future.result(timeout=8)
+        except:
+            print("Telegram timeout → skipped")
+            return []
 
 
 # ================= SENTIMENT =================
 
-def score_sentiment(items: List[Dict], classifier):
+def score_sentiment(items, classifier):
     if not items:
         return pd.DataFrame()
 
@@ -214,7 +194,7 @@ def build_daily(df):
 # ================= MAIN =================
 
 def main():
-    st.title("🇱🇧 LBP Sentiment (FAST & STABLE)")
+    st.title("🇱🇧 LBP Sentiment (STABLE VERSION)")
 
     model_name = st.text_input("Model", "nlptown/bert-base-multilingual-uncased-sentiment")
     query = st.text_input("Query", DEFAULT_QUERY)
@@ -236,7 +216,12 @@ def main():
         progress.progress(60, "Nitter done")
 
         ch = [c.strip() for c in channels.split(",") if c.strip()]
-        telegram = search_telegram(ch, start_date, end_date)
+
+        try:
+            telegram = search_telegram(ch, start_date, end_date)
+        except:
+            telegram = []
+
         progress.progress(90, "Telegram done")
 
         data = google + nitter + telegram
