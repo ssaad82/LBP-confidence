@@ -9,7 +9,7 @@ import streamlit as st
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
 
-WAR_START_DATE = datetime(2025, 6, 13, tzinfo=timezone.utc)
+WAR_START_DATE = datetime(2026, 2, 28, tzinfo=timezone.utc)
 DEFAULT_QUERY = '"الليرة اللبنانية" OR "Lebanese lira" OR "سعر الصرف"'
 DEFAULT_DAYS = 7
 DEFAULT_NITTER_INSTANCE = "https://nitter.net"
