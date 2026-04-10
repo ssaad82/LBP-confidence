@@ -3,7 +3,8 @@ import random
 import time
 import urllib.request
 import asyncio
-from datetime import datetime, timedelta, timezone
+import socket
+from datetime import datetime, timezone
 from typing import Dict, List
 
 import feedparser
@@ -18,14 +19,13 @@ from telethon.sync import TelegramClient
 
 WAR_START_DATE = datetime(2026, 2, 28, tzinfo=timezone.utc)
 DEFAULT_QUERY = '"الليرة اللبنانية" OR "Lebanese lira" OR "سعر الصرف"'
-DEFAULT_DAYS = 7
 
 # Telegram (Telethon)
 API_ID = 34069133
 API_HASH = "f8ec2f82d1eb6df4bdfd004fbd7fea48"
 SESSION_NAME = "telegram_session"
 
-# Nitter fallback instances
+# Nitter instances
 NITTER_INSTANCES = [
     "https://nitter.net",
     "https://nitter.it",
@@ -44,10 +44,10 @@ def load_model(model_name: str):
 
 
 def normalize_label(label: str) -> str:
-    normalized = label.upper()
-    if "1" in normalized or "2" in normalized or "NEG" in normalized:
+    label = label.upper()
+    if "1" in label or "2" in label or "NEG" in label:
         return "negative"
-    if "4" in normalized or "5" in normalized or "POS" in normalized:
+    if "4" in label or "5" in label or "POS" in label:
         return "positive"
     return "neutral"
 
@@ -58,35 +58,34 @@ def search_google_news(query: str, start_date: datetime, end_date: datetime) -> 
     encoded = requests.utils.quote(query)
     rss_url = (
         "https://news.google.com/rss/search?"
-        f"q={encoded}%20when:{(end_date - start_date).days}d&hl=en-US&gl=US&ceid=US:en"
+        f"q={encoded}%20when:30d&hl=en-US&gl=US&ceid=US:en"
     )
 
     feed = feedparser.parse(rss_url)
-    rows: List[Dict] = []
+    rows = []
 
     for entry in feed.entries:
         published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
         if start_date <= published <= end_date:
-            rows.append(
-                {
-                    "source": "google_news",
-                    "published_at": published,
-                    "text": f"{entry.title}. {entry.get('summary', '')}",
-                    "url": entry.link,
-                }
-            )
+            rows.append({
+                "source": "google_news",
+                "published_at": published,
+                "text": f"{entry.title}. {entry.get('summary', '')}",
+                "url": entry.link,
+            })
 
     return rows
 
 
-# ================= NITTER (FIXED) =================
+# ================= NITTER (FAST + SAFE) =================
 
 def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[Dict]:
     encoded = requests.utils.quote(query)
-
     instances = NITTER_INSTANCES.copy()
     random.shuffle(instances)
+
+    socket.setdefaulttimeout(5)
 
     for instance in instances:
         try:
@@ -100,7 +99,7 @@ def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[
             if not feed.entries:
                 continue
 
-            rows: List[Dict] = []
+            rows = []
 
             for entry in feed.entries:
                 if not getattr(entry, "published_parsed", None):
@@ -109,28 +108,26 @@ def search_nitter(query: str, start_date: datetime, end_date: datetime) -> List[
                 published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
 
                 if start_date <= published <= end_date:
-                    rows.append(
-                        {
-                            "source": "nitter",
-                            "published_at": published,
-                            "text": f"{entry.title}. {entry.get('summary', '')}",
-                            "url": entry.link,
-                        }
-                    )
+                    rows.append({
+                        "source": "nitter",
+                        "published_at": published,
+                        "text": f"{entry.title}. {entry.get('summary', '')}",
+                        "url": entry.link,
+                    })
 
             return rows
 
         except Exception as e:
-            print(f"Nitter failed on {instance}: {e}")
+            print(f"Nitter failed: {e}")
             time.sleep(1)
 
     return []
 
 
-# ================= TELEGRAM (TELETHON) =================
+# ================= TELEGRAM (POSTS + COMMENTS) =================
 
 def search_telegram(channel_ids: List[str], start_date: datetime, end_date: datetime) -> List[Dict]:
-    rows: List[Dict] = []
+    rows = []
 
     async def fetch():
         async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
@@ -138,8 +135,9 @@ def search_telegram(channel_ids: List[str], start_date: datetime, end_date: date
                 try:
                     entity = await client.get_entity(channel)
 
-                    async for message in client.iter_messages(entity, limit=500):
-                        if not message.date or not message.text:
+                    async for message in client.iter_messages(entity, limit=100):
+
+                        if not message.date:
                             continue
 
                         published = message.date.replace(tzinfo=timezone.utc)
@@ -147,18 +145,36 @@ def search_telegram(channel_ids: List[str], start_date: datetime, end_date: date
                         if published < start_date:
                             break
 
-                        if start_date <= published <= end_date:
-                            rows.append(
-                                {
-                                    "source": "telegram",
-                                    "published_at": published,
-                                    "text": message.text,
-                                    "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
-                                }
-                            )
+                        # MAIN POST
+                        if message.text:
+                            rows.append({
+                                "source": "telegram_post",
+                                "published_at": published,
+                                "text": message.text,
+                                "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
+                            })
+
+                        # COMMENTS (REPLIES)
+                        if message.replies and message.replies.comments:
+                            try:
+                                async for reply in client.iter_messages(entity, reply_to=message.id, limit=50):
+                                    if not reply.text:
+                                        continue
+
+                                    reply_date = reply.date.replace(tzinfo=timezone.utc)
+
+                                    if start_date <= reply_date <= end_date:
+                                        rows.append({
+                                            "source": "telegram_comment",
+                                            "published_at": reply_date,
+                                            "text": reply.text,
+                                            "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
+                                        })
+                            except:
+                                pass
 
                 except Exception as e:
-                    print(f"Telethon error on {channel}: {e}")
+                    print(f"Telethon error: {e}")
 
     asyncio.run(fetch())
     return rows
@@ -170,29 +186,24 @@ def score_sentiment(items: List[Dict], classifier):
     if not items:
         return pd.DataFrame()
 
+    items = items[:200]  # speed limit
     texts = [x["text"][:512] for x in items]
+
     preds = classifier(texts)
 
     records = []
     for item, pred in zip(items, preds):
-        label = normalize_label(pred["label"])
-
-        records.append(
-            {
-                **item,
-                "sentiment": label,
-                "score": float(pred["score"]),
-                "day": item["published_at"].date(),
-            }
-        )
+        records.append({
+            **item,
+            "sentiment": normalize_label(pred["label"]),
+            "score": float(pred["score"]),
+            "day": item["published_at"].date(),
+        })
 
     return pd.DataFrame(records)
 
 
 def build_daily(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-
     daily = (
         df.groupby(["day", "sentiment"])
         .size()
@@ -213,58 +224,43 @@ def build_daily(df: pd.DataFrame) -> pd.DataFrame:
     return daily.sort_values("day")
 
 
-# ================= MAIN APP =================
+# ================= MAIN =================
 
 def main():
-    st.set_page_config(page_title="Lebanese Lira Sentiment", layout="wide")
+    st.set_page_config(layout="wide")
+    st.title("🇱🇧 Lebanese Lira Sentiment (FULL Timeline + Comments)")
 
-    st.title("🇱🇧 Daily Lebanese Lira Sentiment (Telegram + Google + Nitter)")
+    model_name = st.text_input("Model", value="nlptown/bert-base-multilingual-uncased-sentiment")
+    query = st.text_input("Query", value=DEFAULT_QUERY)
+    channels = st.text_input("Telegram channels", value="@mtvlebanon,@lbci_news")
 
-    with st.sidebar:
-        st.header("Settings")
-
-        model_name = st.text_input(
-            "BERT model",
-            value="nlptown/bert-base-multilingual-uncased-sentiment",
-        )
-
-        query = st.text_input("Search query", value=DEFAULT_QUERY)
-
-        lookback_days = st.number_input("Window (days)", min_value=1, max_value=365, value=DEFAULT_DAYS)
-
-        telegram_channels = st.text_input(
-            "Telegram channels (comma separated @handles)",
-            value="@mtvlebanon,@lbci_news,@lebanon24"
-        )
-
+    start_date = WAR_START_DATE
     end_date = datetime.now(timezone.utc)
-    start_date = max(WAR_START_DATE, end_date - timedelta(days=int(lookback_days)))
 
-    st.write(f"Date range: **{start_date.date()} → {end_date.date()}**")
+    st.write(f"Tracking from {start_date.date()} → {end_date.date()}")
 
-    if st.button("Run daily sentiment analysis", type="primary"):
+    if st.button("Run analysis"):
 
-        with st.spinner("Loading model..."):
-            classifier = load_model(model_name)
+        classifier = load_model(model_name)
 
-        with st.spinner("Collecting data..."):
-            google_rows = search_google_news(query, start_date, end_date)
-            nitter_rows = search_nitter(query, start_date, end_date)
+        progress = st.progress(0)
 
-            channel_list = [c.strip() for c in telegram_channels.split(",") if c.strip()]
-            telegram_rows = search_telegram(channel_list, start_date, end_date)
+        google_rows = search_google_news(query, start_date, end_date)
+        progress.progress(30)
 
-            rows = google_rows + nitter_rows + telegram_rows
+        nitter_rows = search_nitter(query, start_date, end_date)
+        progress.progress(60)
 
-        st.info(
-            f"Collected {len(rows)} items "
-            f"(Google: {len(google_rows)}, Nitter: {len(nitter_rows)}, Telegram: {len(telegram_rows)})"
-        )
+        channel_list = [c.strip() for c in channels.split(",") if c.strip()]
+        telegram_rows = search_telegram(channel_list, start_date, end_date)
+        progress.progress(100)
+
+        rows = google_rows + nitter_rows + telegram_rows
 
         df = score_sentiment(rows, classifier)
 
         if df.empty:
-            st.warning("No data found.")
+            st.warning("No data")
             return
 
         daily = build_daily(df)
