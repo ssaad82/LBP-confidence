@@ -8,7 +8,7 @@ This app runs **daily sentiment analysis** for Lebanese lira discussions from:
 It uses a multilingual **BERT sentiment model** and aggregates results by day.
 
 ## Context window
-The app is anchored to **June 13, 2025**, the start date of the Israel-Iran war timeline used by this project.
+The app is anchored to **February 28, 2026**, the start date of the Middle East conflict timeline used by this project.
 
 ## Run locally
 
