@@ -1,58 +1,67 @@
 import logging
-import requests
+import time
+import asyncio
+from telethon import TelegramClient
+from google_news import GoogleNews
+from nitter import NitterSearch
+from sentiment_analysis import SentimentAnalyzer
+from streamlit import st
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 
-class TelegramBot:
-    def __init__(self, token):
-        self.token = token
-        self.api_url = f'https://api.telegram.org/bot{self.token}/sendMessage'
+# Constants
+API_ID = 'your_api_id'
+API_HASH = 'your_api_hash'
 
-    def send_message(self, chat_id, text):
-        payload = {'chat_id': chat_id, 'text': text}
+# Function for exponential backoff
+async def retry_with_backoff(func, *args, retries=5, delay=1):
+    for i in range(retries):
         try:
-            response = requests.post(self.api_url, data=payload)
-            response.raise_for_status()
-            logging.info("Message sent to Telegram successfully.")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Failed to send message: {e}")
-
-class InputValidator:
-    @staticmethod
-    def validate_input(user_input):
-        if not user_input:
-            logging.error("Invalid input: Input cannot be empty.")
-            raise ValueError("Input cannot be empty.")
-        logging.info("Input validated successfully.")
-
-class SentimentAnalyzer:
-    def analyze_sentiment(self, text):
-        # Placeholder for sentiment analysis logic
-        logging.info("Analyzing sentiment...")
-        # Assume it returns some sentiment score
-        return "positive"
-
-def main():
-    bot_token = 'YOUR_TELEGRAM_BOT_TOKEN'
-    chat_id = 'YOUR_CHAT_ID'
-    user_input = input("Enter your input: ")
-    InputValidator.validate_input(user_input)
-
-    # Retry logic
-    for attempt in range(3):
-        try:
-            sentiment_analyzer = SentimentAnalyzer()
-            sentiment = sentiment_analyzer.analyze_sentiment(user_input)
-            logging.info(f"Sentiment: {sentiment}")
-            # Send message to Telegram
-            bot = TelegramBot(bot_token)
-            bot.send_message(chat_id, f"Sentiment analysis result: {sentiment}")
-            break
+            return await func(*args)
         except Exception as e:
-            logging.error(f"Attempt {attempt + 1} failed: {e}")
-            if attempt == 2:
-                logging.critical("Max retries reached. Exiting.")
+            logging.error(f"Error: {e}")
+            await asyncio.sleep(delay)
+            delay *= 2  # Exponential backoff
+    logging.error("Max retries exceeded")
+    return None
 
+# Input validation function
+def validate_input(input_data):
+    if not isinstance(input_data, str) or len(input_data.strip()) == 0:
+        raise ValueError("Input must be a non-empty string")
+
+# Telegram client setup
+client = TelegramClient('session_name', API_ID, API_HASH)
+
+# Main processing function
+async def main(input_text):
+    validate_input(input_text)
+
+    # Asynchronously fetching data
+    google_news = GoogleNews()
+    news_data = await retry_with_backoff(google_news.search, input_text)
+    nitter_data = await retry_with_backoff(NitterSearch().search, input_text)
+
+    # Sentiment analysis
+    analyzer = SentimentAnalyzer()
+    sentiment_results = await asyncio.gather(*[analyzer.analyze(news) for news in news_data])
+
+    # Visualization in Streamlit
+    st.title(f'Sentiment Analysis for: {input_text}')
+    for result in sentiment_results:
+        st.write(f'Sentiment: {result}')  # Display results
+
+    # Telegram message fetching
+    async with client:
+        messages = await client.get_messages('channel_name')
+        for message in messages:
+            st.write(message.text)  # Display messages
+
+# Streamlit app
 if __name__ == '__main__':
-    main()
+    input_text = st.text_input('Enter text for sentiment analysis:')
+    if st.button('Analyze'):
+        asyncio.run(main(input_text))
+        
+        # Daily aggregation and visualization code goes here
