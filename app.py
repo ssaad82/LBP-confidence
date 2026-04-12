@@ -1,126 +1,58 @@
-# Constants Configuration
-
-# Logging Configuration
 import logging
+import requests
 
-# Set up structured logging
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Function to load models with error handling
+class TelegramBot:
+    def __init__(self, token):
+        self.token = token
+        self.api_url = f'https://api.telegram.org/bot{self.token}/sendMessage'
 
-def load_model(model_path):
-    try:
-        model = ...  # Load the model here
-        return model
-    except Exception as e:
-        logging.error(f'Error loading model: {e}')
-        return None
-
-# Normalized label function with error handling
-
-def normalize_label(label):
-    try:
-        return label.strip().lower()
-    except Exception as e:
-        logging.error(f'Error normalizing label: {e}')
-        return None
-
-# Parse RSS feed with retry mechanism
-import requests
-from time import sleep
-
-
-def _parse_rss_feed(url, retries=3, timeout=5):
-    for attempt in range(retries):
+    def send_message(self, chat_id, text):
+        payload = {'chat_id': chat_id, 'text': text}
         try:
-            response = requests.get(url, timeout=timeout)
+            response = requests.post(self.api_url, data=payload)
             response.raise_for_status()
-            return response.text
-        except requests.exceptions.HTTPError as e:
-            logging.error(f'HTTP error on attempt {attempt + 1}: {e}')
+            logging.info("Message sent to Telegram successfully.")
         except requests.exceptions.RequestException as e:
-            logging.error(f'Request exception: {e}')
-        sleep(2 ** attempt)  # Exponential backoff
-    return None
+            logging.error(f"Failed to send message: {e}")
 
-# Search functions with error handling and validation
+class InputValidator:
+    @staticmethod
+    def validate_input(user_input):
+        if not user_input:
+            logging.error("Invalid input: Input cannot be empty.")
+            raise ValueError("Input cannot be empty.")
+        logging.info("Input validated successfully.")
 
-def search_google_news(query):
-    if not validate_input(query):
-        return 'Invalid input'
-    try:
-        # Perform search Google News API
-        return results
-    except Exception as e:
-        logging.error(f'Error searching Google News: {e}')
-        return None
-
-
-def search_nitter(query):
-    if not validate_input(query):
-        return 'Invalid input'
-    try:
-        # Perform search Nitter
-        return results
-    except Exception as e:
-        logging.error(f'Error searching Nitter: {e}')
-        return None
-
-# Fetch Telegram messages with async support
-import asyncio
-
-async def fetch_telegram_messages(channel_id):
-    try:
-        # Async code to fetch messages
-        return messages
-    except Exception as e:
-        logging.error(f'Error fetching Telegram messages: {e}')
-        return None
-
-# Wrapper function with validation
-
-def search_telegram(query):
-    if not validate_input(query):
-        return 'Invalid input'
-    # Call the fetch function here
-
-def validate_input(query):
-    if not isinstance(query, str) or not query:
-        return False
-    return True
-
-# Score sentiment function with batch processing
-
-def score_sentiment(texts):
-    try:
-        scores = []  # Process batch
-        return scores
-    except Exception as e:
-        logging.error(f'Error scoring sentiment: {e}')
-        return None
-
-# Build daily aggregation function with validation
-
-def build_daily_aggregation(data):
-    if not data:
-        logging.error('No data provided for aggregation')
-        return None
-    # Aggregation logic here
-
-# UI helper function for input validation
-
-def validate_inputs(data):
-    # Add validation logic for UI inputs
-    return True
-
-# Main application function
+class SentimentAnalyzer:
+    def analyze_sentiment(self, text):
+        # Placeholder for sentiment analysis logic
+        logging.info("Analyzing sentiment...")
+        # Assume it returns some sentiment score
+        return "positive"
 
 def main():
-    try:
-        model = load_model('path/to/model')
-        if not model:
-            raise Exception('Failed to load model')
-        # Data fetching logic
-        # Handle metrics
-    except Exception as e:
-        logging.error(f'Error in main app function: {e}')
+    bot_token = 'YOUR_TELEGRAM_BOT_TOKEN'
+    chat_id = 'YOUR_CHAT_ID'
+    user_input = input("Enter your input: ")
+    InputValidator.validate_input(user_input)
+
+    # Retry logic
+    for attempt in range(3):
+        try:
+            sentiment_analyzer = SentimentAnalyzer()
+            sentiment = sentiment_analyzer.analyze_sentiment(user_input)
+            logging.info(f"Sentiment: {sentiment}")
+            # Send message to Telegram
+            bot = TelegramBot(bot_token)
+            bot.send_message(chat_id, f"Sentiment analysis result: {sentiment}")
+            break
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1} failed: {e}")
+            if attempt == 2:
+                logging.critical("Max retries reached. Exiting.")
+
+if __name__ == '__main__':
+    main()
