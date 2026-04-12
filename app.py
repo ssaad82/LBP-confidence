@@ -1,7 +1,6 @@
 import asyncio
 import concurrent.futures
 from datetime import datetime, timezone
-from typing import Dict, List
 
 import feedparser
 import pandas as pd
@@ -14,31 +13,67 @@ from telethon.sync import TelegramClient
 # ================= CONFIG =================
 
 WAR_START_DATE = datetime(2026, 2, 28, tzinfo=timezone.utc)
+
 DEFAULT_QUERY = '"الليرة اللبنانية" OR "Lebanese lira" OR "سعر الصرف"'
+
+# 🎯 Lira + finance focused channels
+DEFAULT_CHANNELS = [
+    "@lbprate",
+    "@lebanonfx",
+    "@lirarate",
+    "@usd_lbp",
+    "@lebfinance",
+    "@lebanoneconomy",
+    "@arabmarkets",
+    "@lebanon24",
+    "@naharnet",
+]
+
+# 🔍 Strong LBP filtering
+KEYWORDS = [
+    "ليرة", "دولار", "سعر الصرف",
+    "usd", "lbp", "exchange", "parallel",
+]
 
 API_ID = 34069133
 API_HASH = "f8ec2f82d1eb6df4bdfd004fbd7fea48"
 SESSION_NAME = "telegram_session"
 
-MAX_BERT_ITEMS = 120
+MAX_BERT_ITEMS = 40
 
 
 # ================= MODEL =================
 
 @st.cache_resource(show_spinner=False)
-def load_model(model_name: str):
+def load_model(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(model_name)
-    return pipeline("sentiment-analysis", model=model, tokenizer=tokenizer, truncation=True)
+    return pipeline(
+        "sentiment-analysis",
+        model=model,
+        tokenizer=tokenizer,
+        truncation=True
+    )
 
 
-def normalize_label(label: str) -> str:
+def normalize_label(label):
     label = label.upper()
     if "1" in label or "2" in label or "NEG" in label:
         return "negative"
     if "4" in label or "5" in label or "POS" in label:
         return "positive"
     return "neutral"
+
+
+# ================= FILTER =================
+
+def filter_relevant(rows):
+    filtered = []
+    for r in rows:
+        text = r["text"].lower()
+        if any(k in text for k in KEYWORDS):
+            filtered.append(r)
+    return filtered
 
 
 # ================= GOOGLE =================
@@ -67,7 +102,7 @@ def search_google_news(query, start_date, end_date):
         return []
 
 
-# ================= NITTER (SAFE + FAST) =================
+# ================= NITTER =================
 
 def search_nitter(query, start_date, end_date):
     try:
@@ -102,11 +137,11 @@ def search_nitter(query, start_date, end_date):
         return []
 
 
-# ================= TELEGRAM (NON-BLOCKING SAFE) =================
+# ================= TELEGRAM =================
 
 def search_telegram(channel_ids, start_date, end_date):
 
-    def run_telegram():
+    def run():
         rows = []
 
         async def fetch():
@@ -114,24 +149,24 @@ def search_telegram(channel_ids, start_date, end_date):
                 for channel in channel_ids:
                     try:
                         entity = await client.get_entity(channel)
-                        messages = await client.get_messages(entity, limit=20)
+                        messages = await client.get_messages(entity, limit=10)
 
-                        for message in messages:
-                            if not message.text or not message.date:
+                        for msg in messages:
+                            if not msg.text or not msg.date:
                                 continue
 
-                            published = message.date.replace(tzinfo=timezone.utc)
+                            published = msg.date.replace(tzinfo=timezone.utc)
 
                             if start_date <= published <= end_date:
                                 rows.append({
                                     "source": "telegram",
                                     "published_at": published,
-                                    "text": message.text,
-                                    "url": f"https://t.me/{channel.lstrip('@')}/{message.id}",
+                                    "text": msg.text,
+                                    "url": f"https://t.me/{channel.lstrip('@')}/{msg.id}",
                                 })
 
-                    except Exception as e:
-                        print("Telegram error:", e)
+                    except:
+                        continue
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -140,14 +175,12 @@ def search_telegram(channel_ids, start_date, end_date):
 
         return rows
 
-    # 🚨 HARD TIMEOUT (prevents freezing)
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(run_telegram)
-        try:
-            return future.result(timeout=8)
-        except:
-            print("Telegram timeout → skipped")
-            return []
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run)
+            return future.result(timeout=5)
+    except concurrent.futures.TimeoutError:
+        return []
 
 
 # ================= SENTIMENT =================
@@ -159,7 +192,7 @@ def score_sentiment(items, classifier):
     items = items[:MAX_BERT_ITEMS]
 
     texts = [x["text"][:512] for x in items]
-    preds = classifier(texts)
+    preds = classifier(texts, batch_size=8)
 
     rows = []
     for item, pred in zip(items, preds):
@@ -186,7 +219,11 @@ def build_daily(df):
             daily[col] = 0
 
     total = daily[["positive", "neutral", "negative"]].sum(axis=1)
-    daily["sentiment_index"] = ((daily["positive"] - daily["negative"]) / total.replace(0, 1))
+
+    # 🎯 ONE FINAL SENTIMENT INDEX
+    daily["sentiment_index"] = (
+        (daily["positive"] - daily["negative"]) / total.replace(0, 1)
+    )
 
     return daily
 
@@ -194,11 +231,19 @@ def build_daily(df):
 # ================= MAIN =================
 
 def main():
-    st.title("🇱🇧 LBP Sentiment (STABLE VERSION)")
+    st.title("🇱🇧 Lebanese Lira Sentiment Index")
 
-    model_name = st.text_input("Model", "nlptown/bert-base-multilingual-uncased-sentiment")
+    model_name = st.text_input(
+        "Model",
+        "nlptown/bert-base-multilingual-uncased-sentiment"
+    )
+
     query = st.text_input("Query", DEFAULT_QUERY)
-    channels = st.text_input("Telegram channels", "@mtvlebanon,@lbci_news")
+
+    channels_input = st.text_area(
+        "Telegram channels",
+        ",".join(DEFAULT_CHANNELS)
+    )
 
     start_date = WAR_START_DATE
     end_date = datetime.now(timezone.utc)
@@ -207,38 +252,39 @@ def main():
 
         classifier = load_model(model_name)
 
-        progress = st.progress(0)
+        channels = [c.strip() for c in channels_input.split(",") if c.strip()]
 
-        google = search_google_news(query, start_date, end_date)
-        progress.progress(30, "Google done")
+        # 🚀 PARALLEL SOURCES
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                "google": executor.submit(search_google_news, query, start_date, end_date),
+                "nitter": executor.submit(search_nitter, query, start_date, end_date),
+                "telegram": executor.submit(search_telegram, channels, start_date, end_date),
+            }
 
-        nitter = search_nitter(query, start_date, end_date)
-        progress.progress(60, "Nitter done")
+            google = futures["google"].result()
+            nitter = futures["nitter"].result()
+            telegram = futures["telegram"].result()
 
-        ch = [c.strip() for c in channels.split(",") if c.strip()]
-
-        try:
-            telegram = search_telegram(ch, start_date, end_date)
-        except:
-            telegram = []
-
-        progress.progress(90, "Telegram done")
-
-        data = google + nitter + telegram
+        # 🔥 FILTER ONLY LBP-RELEVANT CONTENT
+        data = filter_relevant(google + nitter + telegram)
 
         df = score_sentiment(data, classifier)
 
         if df.empty:
-            st.warning("No data found")
+            st.warning("No relevant LBP data found")
             return
 
         daily = build_daily(df)
 
-        progress.progress(100, "Done")
-
+        # 📊 OUTPUT
+        st.subheader("Sentiment Index")
         st.line_chart(daily.set_index("day")[["sentiment_index"]])
+
+        st.subheader("Sentiment Breakdown")
         st.area_chart(daily.set_index("day")[["positive", "neutral", "negative"]])
 
+        st.subheader("Raw Data")
         st.dataframe(df.head(200))
 
 
